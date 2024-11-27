@@ -10,7 +10,7 @@ twitch-videoad.js text/javascript
         scope.OPT_BACKUP_PLATFORM = 'ios';
         scope.OPT_REGULAR_PLAYER_TYPE = 'site';
         scope.OPT_ACCESS_TOKEN_PLAYER_TYPE = null;
-        scope.OPT_SHOW_AD_BANNER = true;
+        scope.OPT_SHOW_AD_BANNER = false;
         scope.AD_SIGNIFIER = 'stitched-ad';
         scope.LIVE_SIGNIFIER = ',live';
         scope.CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';

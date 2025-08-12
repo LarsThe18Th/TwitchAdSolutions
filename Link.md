@@ -1,3 +1,10 @@
+## Original GIT by pixeltris
+
+https://github.com/pixeltris/TwitchAdSolutions/tree/master
+
+
+
+
 ## Org Link
 
 https://raw.githubusercontent.com/pixeltris/TwitchAdSolutions/master/video-swap-new/video-swap-new-ublock-origin.js

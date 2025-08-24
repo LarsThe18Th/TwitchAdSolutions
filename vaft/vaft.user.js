@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/pixeltris/TwitchAdSolutions
-// @version      14.0.0
+// @version      24.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/pixeltris/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/pixeltris/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -9,10 +9,21 @@
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @inject-into  page
-// @grant        none
+// @grant        GM.xmlHttpRequest
+// @connect      gql.twitch.tv
 // ==/UserScript==
 (function() {
     'use strict';
+    var ourTwitchAdSolutionsVersion = 9;// Used to prevent conflicts with outdated versions of the scripts
+    if (typeof unsafeWindow === 'undefined') {
+        unsafeWindow = window;
+    }
+    if (typeof unsafeWindow.twitchAdSolutionsVersion !== 'undefined' && unsafeWindow.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
+        console.log("skipping vaft as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + unsafeWindow.twitchAdSolutionsVersion);
+        unsafeWindow.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
+        return;
+    }
+    unsafeWindow.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
     function declareOptions(scope) {
         scope.AdSignifier = 'stitched';
         scope.ClientID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
@@ -37,36 +48,77 @@
     var adBlockDiv = null;
     var OriginalVideoPlayerQuality = null;
     var IsPlayerAutoQuality = null;
-    const oldWorker = window.Worker;
-    function isWorkerDoubleHooked(ourWorker, identifier) {
-        var ourWorkerString = ourWorker ? ourWorker.toString() : null;
-        var proto = window.Worker;
-        while (proto)
-        {
+    var workerStringConflicts = [
+        'twitch',
+        'isVariantA'// TwitchNoSub
+    ];
+    var workerStringAllow = [];
+    var workerStringReinsert = [
+        'isVariantA',// TwitchNoSub (prior to (0.9))
+        'besuper/',// TwitchNoSub (0.9)
+        '${patch_url}'// TwitchNoSub (0.9.1)
+    ];
+    function getCleanWorker(worker) {
+        var root = null;
+        var parent = null;
+        var proto = worker;
+        while (proto) {
             var workerString = proto.toString();
-            if (workerString.includes(identifier) && workerString !== ourWorkerString) {
-                return true;
+            if (workerStringConflicts.some((x) => workerString.includes(x)) && !workerStringAllow.some((x) => workerString.includes(x))) {
+                if (parent !== null) {
+                    Object.setPrototypeOf(parent, Object.getPrototypeOf(proto));
+                }
+            } else {
+                if (root === null) {
+                    root = proto;
+                }
+                parent = proto;
             }
             proto = Object.getPrototypeOf(proto);
         }
-        return false;
+        return root;
+    }
+    function getWorkersForReinsert(worker) {
+        var result = [];
+        var proto = worker;
+        while (proto) {
+            var workerString = proto.toString();
+            if (workerStringReinsert.some((x) => workerString.includes(x))) {
+                result.push(proto);
+            } else {
+            }
+            proto = Object.getPrototypeOf(proto);
+        }
+        return result;
+    }
+    function reinsertWorkers(worker, reinsert) {
+        var parent = worker;
+        for (var i = 0; i < reinsert.length; i++) {
+            Object.setPrototypeOf(reinsert[i], parent);
+            parent = reinsert[i];
+        }
+        return parent;
+    }
+    function isValidWorker(worker) {
+        var workerString = worker.toString();
+        return !workerStringConflicts.some((x) => workerString.includes(x))
+            || workerStringAllow.some((x) => workerString.includes(x))
+            || workerStringReinsert.some((x) => workerString.includes(x));
     }
     function hookWindowWorker() {
-        var newWorker = window.Worker = class Worker extends oldWorker {
+        var reinsert = getWorkersForReinsert(unsafeWindow.Worker);
+        var newWorker = class Worker extends getCleanWorker(unsafeWindow.Worker) {
             constructor(twitchBlobUrl, options) {
                 var isTwitchWorker = false;
                 try {
                     isTwitchWorker = new URL(twitchBlobUrl).origin.endsWith('.twitch.tv');
                 } catch {}
-                if (isWorkerDoubleHooked(newWorker, 'twitch')) {
-                    console.log('Multiple twitch adblockers installed. Skipping Worker hook (vaft)');
-                    isTwitchWorker = false;
-                }
                 if (!isTwitchWorker) {
                     super(twitchBlobUrl, options);
                     return;
                 }
                 var newBlobStr = `
+                    const pendingFetchRequests = new Map();
                     ${getStreamUrlForResolution.toString()}
                     ${getStreamForResolution.toString()}
                     ${stripUnusedParams.toString()}
@@ -78,34 +130,49 @@
                     ${adRecordgqlPacket.toString()}
                     ${tryNotifyTwitch.toString()}
                     ${parseAttributes.toString()}
-                    ${getWasmWorkerUrl.toString()}
-                    var workerUrl = getWasmWorkerUrl('${twitchBlobUrl.replaceAll("'", "%27")}');
-                    if (workerUrl && workerUrl.includes('assets.twitch.tv/assets/amazon-ivs-wasmworker')) {
-                        declareOptions(self);
-                        self.addEventListener('message', function(e) {
-                            if (e.data.key == 'UpdateIsSquadStream') {
-                                IsSquadStream = e.data.value;
-                            } else if (e.data.key == 'UpdateClientVersion') {
-                                ClientVersion = e.data.value;
-                            } else if (e.data.key == 'UpdateClientSession') {
-                                ClientSession = e.data.value;
-                            } else if (e.data.key == 'UpdateClientId') {
-                                ClientID = e.data.value;
-                            } else if (e.data.key == 'UpdateDeviceId') {
-                                GQLDeviceID = e.data.value;
-                            } else if (e.data.key == 'UpdateClientIntegrityHeader') {
-                                ClientIntegrityHeader = e.data.value;
-                            } else if (e.data.key == 'UpdateAuthorizationHeader') {
-                                AuthorizationHeader = e.data.value;
+                    ${getWasmWorkerJs.toString()}
+                    var workerString = getWasmWorkerJs('${twitchBlobUrl.replaceAll("'", "%27")}');
+                    declareOptions(self);
+                    self.addEventListener('message', function(e) {
+                        if (e.data.key == 'UpdateIsSquadStream') {
+                            IsSquadStream = e.data.value;
+                        } else if (e.data.key == 'UpdateClientVersion') {
+                            ClientVersion = e.data.value;
+                        } else if (e.data.key == 'UpdateClientSession') {
+                            ClientSession = e.data.value;
+                        } else if (e.data.key == 'UpdateClientId') {
+                            ClientID = e.data.value;
+                        } else if (e.data.key == 'UpdateDeviceId') {
+                            GQLDeviceID = e.data.value;
+                        } else if (e.data.key == 'UpdateClientIntegrityHeader') {
+                            ClientIntegrityHeader = e.data.value;
+                        } else if (e.data.key == 'UpdateAuthorizationHeader') {
+                            AuthorizationHeader = e.data.value;
+                        } else if (e.data.key == 'FetchResponse') {
+                            const responseData = e.data.value;
+                            if (pendingFetchRequests.has(responseData.id)) {
+                                const { resolve, reject } = pendingFetchRequests.get(responseData.id);
+                                pendingFetchRequests.delete(responseData.id);
+                                if (responseData.error) {
+                                    reject(new Error(responseData.error));
+                                } else {
+                                    // Create a Response object from the response data
+                                    const response = new Response(responseData.body, {
+                                        status: responseData.status,
+                                        statusText: responseData.statusText,
+                                        headers: responseData.headers
+                                    });
+                                    resolve(response);
+                                }
                             }
-                        });
-                        hookWorkerFetch();
-                        importScripts(workerUrl);
-                    }
+                        }
+                    });
+                    hookWorkerFetch();
+                    eval(workerString);
                 `;
                 super(URL.createObjectURL(new Blob([newBlobStr])), options);
                 twitchWorkers.push(this);
-                this.onmessage = function(e) {
+                this.addEventListener('message', (e) => {
                     if (e.data.key == 'ShowAdBlockBanner') {
                         if (adBlockDiv == null) {
                             adBlockDiv = getAdBlockDiv();
@@ -191,10 +258,10 @@
                                                         qualityToSelect = 0;
                                                     }
                                                 }
-                                                var currentQualityLS = window.localStorage.getItem('video-quality');
+                                                var currentQualityLS = unsafeWindow.localStorage.getItem('video-quality');
                                                 lowQuality[qualityToSelect].click();
                                                 settingsCog.click();
-                                                window.localStorage.setItem('video-quality', currentQualityLS);
+                                                unsafeWindow.localStorage.setItem('video-quality', currentQualityLS);
                                                 if (e.data.value != null) {
                                                     OriginalVideoPlayerQuality = null;
                                                     IsPlayerAutoQuality = null;
@@ -210,7 +277,17 @@
                             IsPlayerAutoQuality = null;
                         }
                     }
-                };
+                });
+                this.addEventListener('message', async event => {
+                    if (event.data.key == 'FetchRequest') {
+                        const fetchRequest = event.data.value;
+                        const responseData = await handleWorkerFetchRequest(fetchRequest);
+                        this.postMessage({
+                            key: 'FetchResponse',
+                            value: responseData
+                        });
+                    }
+                });
                 function getAdBlockDiv() {
                     //To display a notification to the user, that an ad is being blocked.
                     var playerRootDiv = document.querySelector('.video-player');
@@ -230,16 +307,29 @@
                 }
             }
         };
+        var workerInstance = reinsertWorkers(newWorker, reinsert);
+        Object.defineProperty(unsafeWindow, 'Worker', {
+            get: function() {
+                return workerInstance;
+            },
+            set: function(value) {
+                if (isValidWorker(value)) {
+                    workerInstance = value;
+                } else {
+                    console.log('Attempt to set twitch worker denied');
+                }
+            }
+        });
     }
-    function getWasmWorkerUrl(twitchBlobUrl) {
+    function getWasmWorkerJs(twitchBlobUrl) {
         var req = new XMLHttpRequest();
         req.open('GET', twitchBlobUrl, false);
         req.overrideMimeType("text/javascript");
         req.send();
-        return req.responseText.split("'")[1];
+        return req.responseText;
     }
     function hookWorkerFetch() {
-        console.log('hookWorkerFetch');
+        console.log('hookWorkerFetch (vaft)');
         var realFetch = fetch;
         fetch = async function(url, options) {
             if (typeof url === 'string') {
@@ -609,7 +699,7 @@
             },
         }];
     }
-    function getAccessToken(channelName, playerType, realFetch) {
+    function getAccessToken(channelName, playerType) {
         var body = null;
         var templateQuery = 'query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: "ios", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {    value    signature    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: "ios", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}';
         body = {
@@ -623,14 +713,9 @@
                 'playerType': playerType
             }
         };
-        return gqlRequest(body, realFetch);
+        return gqlRequest(body);
     }
-    function gqlRequest(body, realFetch) {
-        if (ClientIntegrityHeader == null) {
-            //console.warn('ClientIntegrityHeader is null');
-            //throw 'ClientIntegrityHeader is null';
-        }
-        var fetchFunc = realFetch ? realFetch : fetch;
+    function gqlRequest(body) {
         if (!GQLDeviceID) {
             var dcharacters = 'abcdefghijklmnopqrstuvwxyz0123456789';
             var dcharactersLength = dcharacters.length;
@@ -638,18 +723,34 @@
                 GQLDeviceID += dcharacters.charAt(Math.floor(Math.random() * dcharactersLength));
             }
         }
-        return fetchFunc('https://gql.twitch.tv/gql', {
-            method: 'POST',
-            body: JSON.stringify(body),
-            headers: {
-                'Client-ID': ClientID,
-                'Client-Integrity': ClientIntegrityHeader,
-                'Device-ID': GQLDeviceID,
-                'X-Device-Id': GQLDeviceID,
-                'Client-Version': ClientVersion,
-                'Client-Session-Id': ClientSession,
-                'Authorization': AuthorizationHeader
-            }
+        var headers = {
+            'Client-ID': ClientID,
+            'Client-Integrity': ClientIntegrityHeader,
+            'Device-ID': GQLDeviceID,
+            'X-Device-Id': GQLDeviceID,
+            'Client-Version': ClientVersion,
+            'Client-Session-Id': ClientSession,
+            'Authorization': AuthorizationHeader
+        };
+        return new Promise((resolve, reject) => {
+            const requestId = Math.random().toString(36).substring(2, 15);
+            const fetchRequest = {
+                id: requestId,
+                url: 'https://gql.twitch.tv/gql',
+                options: {
+                    method: 'POST',
+                    body: JSON.stringify(body),
+                    headers
+                }
+            };
+            pendingFetchRequests.set(requestId, {
+                resolve,
+                reject
+            });
+            postMessage({
+                key: 'FetchRequest',
+                value: fetchRequest
+            });
         });
     }
     function doTwitchPlayerTask(isPausePlay, isCheckQuality, isCorrectBuffer, isAutoQuality, setAutoQuality) {
@@ -751,20 +852,95 @@
             } catch (err) {}
         } catch (err) {}
     }
-    window.reloadTwitchPlayer = doTwitchPlayerTask;
+    unsafeWindow.reloadTwitchPlayer = doTwitchPlayerTask;
     var localDeviceID = null;
-    localDeviceID = window.localStorage.getItem('local_copy_unique_id');
+    localDeviceID = unsafeWindow.localStorage.getItem('local_copy_unique_id');
     function postTwitchWorkerMessage(key, value) {
         twitchWorkers.forEach((worker) => {
             worker.postMessage({key: key, value: value});
         });
     }
+    function makeGmXmlHttpRequest(fetchRequest) {
+        return new Promise((resolve, reject) => {
+            GM.xmlHttpRequest({
+                method: fetchRequest.options.method,
+                url: fetchRequest.url,
+                data: fetchRequest.options.body,
+                headers: fetchRequest.options.headers,
+                onload: response => resolve(response),
+                onerror: error => reject(error)
+            });
+        });
+    }
+    // Taken from https://github.com/dimdenGD/YeahTwitter/blob/9e0520f5abe029f57929795d8de0d2e5d3751cf3/us.js#L48
+    function parseHeaders(headersString) {
+        const headers = new Headers();
+        const lines = headersString.trim().split(/[\r\n]+/);
+        lines.forEach(line => {
+            const parts = line.split(':');
+            const header = parts.shift();
+            const value = parts.join(':');
+            headers.append(header, value);
+        });
+        return headers;
+    }
+    var serverLikesThisBrowser = false;
+    var serverHatesThisBrowser = false;
+    async function handleWorkerFetchRequest(fetchRequest) {
+        try {
+            if (serverLikesThisBrowser || !serverHatesThisBrowser) {
+                const response = await unsafeWindow.realFetch(fetchRequest.url, fetchRequest.options);
+                const responseBody = await response.text();
+                const responseObject = {
+                    id: fetchRequest.id,
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: Object.fromEntries(response.headers.entries()),
+                    body: responseBody
+                };
+                if (responseObject.status === 200) {
+                    var resp = JSON.parse(responseBody);
+                    if (typeof resp.errors !== 'undefined') {
+                        serverHatesThisBrowser = true;
+                    } else {
+                        serverLikesThisBrowser = true;
+                    }
+                }
+                if (serverLikesThisBrowser || !serverHatesThisBrowser) {
+                    return responseObject;
+                }
+            }
+            if (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest !== 'undefined') {
+                fetchRequest.options.headers['Sec-Ch-Ua'] = '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"';
+                fetchRequest.options.headers['Referer'] = 'https://www.twitch.tv/';
+                fetchRequest.options.headers['Origin'] = 'https://www.twitch.tv/';
+                fetchRequest.options.headers['Host'] = 'gql.twitch.tv';
+                const response = await makeGmXmlHttpRequest(fetchRequest);
+                const responseBody = response.responseText;
+                const responseObject = {
+                    id: fetchRequest.id,
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: Object.fromEntries(parseHeaders(response.responseHeaders).entries()),
+                    body: responseBody
+                };
+                return responseObject;
+            }
+            throw { message: 'Failed to resolve GQL request. Try the userscript version of the ad blocking solution' };
+        } catch (error) {
+            return {
+                id: fetchRequest.id,
+                error: error.message
+            };
+        }
+    }
     function hookFetch() {
-        var realFetch = window.fetch;
-        window.fetch = function(url, init, ...args) {
+        var realFetch = unsafeWindow.fetch;
+        unsafeWindow.realFetch = realFetch;
+        unsafeWindow.fetch = function(url, init, ...args) {
             if (typeof url === 'string') {
                 //Check if squad stream.
-                if (window.location.pathname.includes('/squad')) {
+                if (unsafeWindow.location.pathname.includes('/squad')) {
                     postTwitchWorkerMessage('UpdateIsSquadStream', true);
                 } else {
                     postTwitchWorkerMessage('UpdateIsSquadStream', false);
@@ -855,6 +1031,8 @@
                 }
             });
         }catch{}
+        let hidden = document.__lookupGetter__('hidden');
+        let webkitHidden = document.__lookupGetter__('webkitHidden');
         try {
             Object.defineProperty(document, 'hidden', {
                 get() {
@@ -867,9 +1045,23 @@
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-        document.addEventListener('visibilitychange', block, true);
-        document.addEventListener('webkitvisibilitychange', block, true);
-        document.addEventListener('mozvisibilitychange', block, true);
+        let wasVideoPlaying = true;
+        var visibilityChange = e => {
+            if (typeof chrome !== 'undefined') {
+                const videos = document.getElementsByTagName('video');
+                if (videos.length > 0) {
+                    if (hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true)) {
+                        wasVideoPlaying = !videos[0].paused && !videos[0].ended;
+                    } else if (wasVideoPlaying && !videos[0].ended) {
+                        videos[0].play();
+                    }
+                }
+            }
+            block(e);
+        };
+        document.addEventListener('visibilitychange', visibilityChange, true);
+        document.addEventListener('webkitvisibilitychange', visibilityChange, true);
+        document.addEventListener('mozvisibilitychange', visibilityChange, true);
         document.addEventListener('hasFocus', block, true);
         try {
             if (/Firefox/.test(navigator.userAgent)) {
@@ -887,19 +1079,14 @@
             }
         }catch{}
     }
-    if (isWorkerDoubleHooked(null, 'twitch')) {
-        console.log('Twitch Worker is already hooked. Skipping (vaft)');
+    declareOptions(unsafeWindow);
+    hookWindowWorker();
+    hookFetch();
+    if (document.readyState === "complete" || document.readyState === "loaded" || document.readyState === "interactive") {
+        onContentLoaded();
     } else {
-        window.reloadTwitchPlayer = reloadTwitchPlayer;
-        declareOptions(window);
-        hookWindowWorker();
-        hookFetch();
-        if (document.readyState === "complete" || document.readyState === "loaded" || document.readyState === "interactive") {
+        unsafeWindow.addEventListener("DOMContentLoaded", function() {
             onContentLoaded();
-        } else {
-            window.addEventListener("DOMContentLoaded", function() {
-                onContentLoaded();
-            });
-        }
+        });
     }
 })();
